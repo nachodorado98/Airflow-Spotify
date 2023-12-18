@@ -22,18 +22,16 @@ def existe_tabla(hook:PostgresHook=crearHook())->str:
 	return "no_creacion_tabla" if (TABLA,) in tablas else "creacion_tabla"
 
 # Funcion que no crea la tabla de las canciones
-def noCrearTabla(hook:PostgresHook=crearHook())->None:
+def noCrearTabla(hook:PostgresHook=crearHook(), **kwarg)->None:
 
 	print(f"Tabla {TABLA} existente")
 
 	numero_registros=hook.get_records(f"SELECT COUNT(*) FROM {TABLA};")[0][0]
 
-	print(f"Numero de registros: {numero_registros}")
-
-	raise AirflowSkipException("Parada")
+	kwarg["ti"].xcom_push(key="numero_registros", value=numero_registros)
 
 # Funcion para crear la tabla de las canciones
-def crearTabla(hook:PostgresHook=crearHook())->None:
+def crearTabla(hook:PostgresHook=crearHook(), **kwarg)->None:
 
 	hook.run(f"""CREATE TABLE {TABLA} (id VARCHAR(30) PRIMARY KEY,
 										nombre VARCHAR(200),
@@ -42,6 +40,8 @@ def crearTabla(hook:PostgresHook=crearHook())->None:
 										fecha DATE);""")
 	
 	print(f"Tabla {TABLA} creada correctamente")
+
+	kwarg["ti"].xcom_push(key="numero_registros", value=0)
 
 # Funcion para realizar una peticion a la API
 def peticion_API(token:str, salto:int=0, limite:int=100)->Optional[Dict]:
@@ -84,11 +84,19 @@ def extraerCanciones(salto:int=0)->List[Dict]:
 # Funcion para extraer los datos de la API de Spotify
 def extraccion(**kwarg)->None:
 
-	canciones=extraerCanciones()	
+	salto=kwarg["ti"].xcom_pull(key="numero_registros", task_ids=["creacion_tabla", "no_creacion_tabla"])[0]
+
+	canciones=extraerCanciones(salto)
+
+	if len(canciones)==0:
+
+		raise AirflowSkipException("Canciones actualizadas")
 
 	kwarg["ti"].xcom_push(key="data_extraida", value=canciones)
 
 	print("Extraccion correcta")
+
+	print(f"Canciones extraidas: {len(canciones)}")
 
 # Funcion para transformar los datos de la API de Spotify
 def transformacion(**kwarg)->None:
@@ -125,6 +133,8 @@ def carga(hook:PostgresHook=crearHook(), **kwarg)->None:
 
 	canciones=[tuple(cancion) for cancion in data]
 
+	canciones_anadidas=0
+
 	for cancion in canciones:
 
 		print(f"Insertando la cancion '{cancion[1]}'...")
@@ -133,11 +143,15 @@ def carga(hook:PostgresHook=crearHook(), **kwarg)->None:
 
 			hook.run(f"INSERT INTO {TABLA} VALUES %s", parameters=(cancion,))
 
+			canciones_anadidas+=1		
+
 		except:
 
 			print(f"Error en la insercion de la cancion '{cancion[1]}' con ID '{cancion[0]}'")
 		
 	print("Carga correcta")
+
+	print(f"Canciones añadidas: {canciones_anadidas}")
 
 
 with DAG("spotify_dag", start_date=datetime(2023,12,16), description="DAG para obtener datos de la API de Spotify",
