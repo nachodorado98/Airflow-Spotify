@@ -5,15 +5,41 @@ from airflow.exceptions import AirflowSkipException
 import requests
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from typing import Optional, Dict, List
+import os
 
 from spotify.autenticacion.auth import generarToken
 from spotify.autenticacion.config import CLIENTE_ID, CLIENTE_SECRETO
 
 from spotify.database.conexion import crearHook
 
-from spotify.config import TABLA, PLAYLIST
+from spotify.config import TABLA, PLAYLIST, LOGS
 
 
+# Funcion para crear la carpeta de los logs
+def crearCarpetaLogs()->None:
+
+	ruta_carpeta_logs=os.path.join(os.getcwd(), LOGS)
+
+	if not os.path.exists(ruta_carpeta_logs):
+
+		os.makedirs(ruta_carpeta_logs)
+
+# Funcion para crear el archivo txt y almacenarlo en la carpeta
+def crearLogs(inicio:bool, canciones_extraidas:int, canciones_anadidas:int=0)->None:
+
+	ruta_carpeta_logs=os.path.join(os.getcwd(), LOGS)
+
+	archivo_log=f"log_{datetime.now().strftime('%Y%m%d_%H%M')}.txt"
+
+	ruta_archivo_log=os.path.join(ruta_carpeta_logs, archivo_log)
+
+	with open(ruta_archivo_log, "w") as archivo:
+
+		archivo.write(f"Fecha de ejecucion: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+		archivo.write(f"Inicio: {inicio}\n")
+		archivo.write(f"Canciones extraidas: {canciones_extraidas}\n")
+		archivo.write(f"Canciones añadidas: {canciones_anadidas}\n")
+		
 # Funcion para comprobar que existe la tabla
 def existe_tabla(hook:PostgresHook=crearHook())->str:
 
@@ -32,6 +58,8 @@ def noCrearTabla(hook:PostgresHook=crearHook(), **kwarg)->None:
 
 # Funcion para crear la tabla de las canciones
 def crearTabla(hook:PostgresHook=crearHook(), **kwarg)->None:
+
+	crearCarpetaLogs()
 
 	hook.run(f"""CREATE TABLE {TABLA} (id VARCHAR(30) PRIMARY KEY,
 										nombre VARCHAR(200),
@@ -90,18 +118,22 @@ def extraccion(**kwarg)->None:
 
 	if len(canciones)==0:
 
+		crearLogs(False, 0)		
+
 		raise AirflowSkipException("Canciones actualizadas")
 
 	kwarg["ti"].xcom_push(key="data_extraida", value=canciones)
 
 	print("Extraccion correcta")
 
-	print(f"Canciones extraidas: {len(canciones)}")
+	kwarg["ti"].xcom_push(key="inicio", value=True if salto==0 else False)
+
+	kwarg["ti"].xcom_push(key="canciones_extraidas", value=len(canciones))
 
 # Funcion para transformar los datos de la API de Spotify
 def transformacion(**kwarg)->None:
 
-	data=kwarg["ti"].xcom_pull(key="data_extraida", task_ids="extracion_data")
+	data=kwarg["ti"].xcom_pull(key="data_extraida", task_ids="extraccion_data")
 
 	# Funcion para limpiar la cancion
 	def limpiarCancion(cancion:Dict)->tuple:
@@ -151,10 +183,14 @@ def carga(hook:PostgresHook=crearHook(), **kwarg)->None:
 		
 	print("Carga correcta")
 
-	print(f"Canciones añadidas: {canciones_anadidas}")
+	inicio=kwarg["ti"].xcom_pull(key="inicio", task_ids="extraccion_data")
+
+	canciones_extraidas=kwarg["ti"].xcom_pull(key="canciones_extraidas", task_ids="extraccion_data")
+
+	crearLogs(inicio, canciones_extraidas, canciones_anadidas)
 
 
-with DAG("spotify_dag", start_date=datetime(2023,12,16), description="DAG para obtener datos de la API de Spotify",
+with DAG("spotify_dag", start_date=datetime(2023,12,18), description="DAG para obtener datos de la API de Spotify",
 			schedule_interval=timedelta(days=7), catchup=False) as dag:
 
 	comprobacion_tabla=BranchPythonOperator(task_id="existe_tabla", python_callable=existe_tabla)
@@ -163,11 +199,10 @@ with DAG("spotify_dag", start_date=datetime(2023,12,16), description="DAG para o
 
 	no_creacion_tabla=PythonOperator(task_id="no_creacion_tabla", python_callable=noCrearTabla)
 
-	extraccion_data=PythonOperator(task_id="extracion_data", python_callable=extraccion, trigger_rule="none_failed_min_one_success")
+	extraccion_data=PythonOperator(task_id="extraccion_data", python_callable=extraccion, trigger_rule="none_failed_min_one_success")
 
 	transformacion_data=PythonOperator(task_id="transformacion_data", python_callable=transformacion)
 
 	carga_data=PythonOperator(task_id="carga_data", python_callable=carga)
 
 	comprobacion_tabla >> [creacion_tabla, no_creacion_tabla] >> extraccion_data >> transformacion_data >> carga_data
-	
